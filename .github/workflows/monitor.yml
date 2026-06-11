@@ -1,0 +1,36 @@
+name: Maastricht Rental Monitor
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run monitor
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python monitor.py
+
+      - name: Commit updated seen.json
+        run: |
+          git config user.email "rental-bot@github.com"
+          git config user.name "Rental Bot"
+          git add seen.json
+          git diff --staged --quiet || (git commit -m "chore: update seen listings [skip ci]" && git push)

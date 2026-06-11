@@ -1,0 +1,22 @@
+{
+  "city": "maastricht",
+  "max_price": 750,
+  "email_to": "ernestas.nelkinas@gmail.com",
+  "sites": [
+    "pararius",
+    "funda",
+    "kamernet",
+    "huure",
+    "housinganywhere",
+    "maasland",
+    "vbt",
+    "housing4you",
+    "househunting",
+    "hypodomus",
+    "huizenbeheer",
+    "kamermaastricht",
+    "prohousing",
+    "roofz",
+    "woonpleinlimburg"
+  ]
+}
