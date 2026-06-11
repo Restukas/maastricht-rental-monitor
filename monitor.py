@@ -7,6 +7,7 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 CONFIG = json.loads(Path("config.json").read_text())
 SEEN_FILE = Path("seen.json")
@@ -24,9 +25,11 @@ HEADERS = {
     )
 }
 
-
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+# Shared Playwright browser instance (set in main)
+_browser = None
 
 
 def get(url):
@@ -35,12 +38,28 @@ def get(url):
     return r.text
 
 
+def get_js(url, wait_for=None, timeout=20000):
+    page = _browser.new_page()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        if wait_for:
+            try:
+                page.wait_for_selector(wait_for, timeout=10000)
+            except Exception:
+                pass
+        else:
+            page.wait_for_timeout(3000)
+        return page.content()
+    finally:
+        page.close()
+
+
 def soup(html):
     return BeautifulSoup(html, "html.parser")
 
 
 # ---------------------------------------------------------------------------
-# Scrapers – each returns list of {"id": str, "title": str, "price": str, "url": str}
+# Scrapers – requests (statiniai puslapiai)
 # ---------------------------------------------------------------------------
 
 def scrape_maasland():
@@ -58,7 +77,7 @@ def scrape_maasland():
         price = extract_price(title)
         if price and price > MAX_PRICE:
             continue
-        uid = href.split("?")[0].rstrip("/").split("/")[-1]
+        uid = href.rstrip("/").split("/")[-1]
         results.append({"id": f"maasland-{uid}", "title": title, "price": str(price or "?"), "url": href})
     return results
 
@@ -174,7 +193,6 @@ def scrape_kamermaastricht():
         href = link["href"]
         if not href.startswith("http"):
             href = "https://www.kamermaastricht.com" + href
-        # skip filter/action links
         if "?" in href and "action_" in href:
             continue
         title = card.get_text(" ", strip=True)[:120]
@@ -229,9 +247,7 @@ def scrape_roofz():
 
 
 def scrape_woonplein():
-    html = get(
-        "https://woonpleinlimburg.nl/en/zoek-woningen/huur/nederland/maastricht/appartement"
-    )
+    html = get("https://woonpleinlimburg.nl/en/zoek-woningen/huur/nederland/maastricht/appartement")
     s = soup(html)
     results = []
     for card in s.select(".property, .listing, article, .woning-item"):
@@ -247,6 +263,138 @@ def scrape_woonplein():
             continue
         uid = href.rstrip("/").split("/")[-1]
         results.append({"id": f"wp-{uid}", "title": title, "price": str(price or "?"), "url": href})
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Scrapers – Playwright (JavaScript-rendered puslapiai)
+# ---------------------------------------------------------------------------
+
+def scrape_pararius():
+    html = get_js(
+        "https://www.pararius.com/apartments/maastricht/0-750",
+        wait_for=".listing-search-item",
+    )
+    s = soup(html)
+    results = []
+    for card in s.select(".listing-search-item"):
+        link = card.find("a", href=True)
+        if not link:
+            continue
+        href = link["href"]
+        if not href.startswith("http"):
+            href = "https://www.pararius.com" + href
+        title = card.get_text(" ", strip=True)[:120]
+        price = extract_price(title)
+        if price and price > MAX_PRICE:
+            continue
+        uid = href.rstrip("/").split("/")[-1]
+        results.append({"id": f"par-{uid}", "title": title, "price": str(price or "?"), "url": href})
+    return results
+
+
+def scrape_funda():
+    html = get_js(
+        "https://www.funda.nl/zoeken/huur/?selected_area=%5B%22maastricht%22%5D&price=%22-750%22",
+        wait_for="[data-test-id='search-result-item']",
+    )
+    s = soup(html)
+    results = []
+    for card in s.select("[data-test-id='search-result-item'], .search-result__header-title-col"):
+        link = card.find("a", href=True)
+        if not link:
+            continue
+        href = link["href"]
+        if not href.startswith("http"):
+            href = "https://www.funda.nl" + href
+        if "/detail/" not in href and "/huur/" not in href:
+            continue
+        title = card.get_text(" ", strip=True)[:120]
+        price = extract_price(title)
+        if price and price > MAX_PRICE:
+            continue
+        uid = href.rstrip("/").split("/")[-1]
+        results.append({"id": f"funda-{uid}", "title": title, "price": str(price or "?"), "url": href})
+    return results
+
+
+def scrape_kamernet():
+    html = get_js(
+        "https://kamernet.nl/en/for-rent/rooms-maastricht",
+        wait_for="a[href*='/for-rent/']",
+    )
+    s = soup(html)
+    results = []
+    seen_hrefs = set()
+    for a in s.find_all("a", href=True):
+        href = a["href"]
+        if "/for-rent/" not in href or "maastricht" not in href.lower():
+            continue
+        if href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+        if not href.startswith("http"):
+            href = "https://kamernet.nl" + href
+        title = a.get_text(" ", strip=True)[:120]
+        price = extract_price(title)
+        if price and price > MAX_PRICE:
+            continue
+        uid = href.rstrip("/").split("/")[-1]
+        results.append({"id": f"kn-{uid}", "title": title, "price": str(price or "?"), "url": href})
+    return results
+
+
+def scrape_huure():
+    html = get_js(
+        "https://huure.nl/rental-property/maastricht",
+        wait_for=".property-card",
+    )
+    s = soup(html)
+    results = []
+    for card in s.select(".property-card, [class*='property-card']"):
+        link = card.find("a", href=True)
+        if not link:
+            continue
+        href = link["href"]
+        if not href.startswith("http"):
+            href = "https://huure.nl" + href
+        if "/huurwoningen/" not in href:
+            continue
+        title = card.get_text(" ", strip=True)[:120]
+        price = extract_price(title)
+        if price and price > MAX_PRICE:
+            continue
+        uid = href.rstrip("/").split("/")[-1]
+        results.append({"id": f"huure-{uid}", "title": title, "price": str(price or "?"), "url": href})
+    return results
+
+
+def scrape_housinganywhere():
+    html = get_js(
+        "https://housinganywhere.com/s/Maastricht--Netherlands/student-accommodation?maxPrice=750",
+        wait_for="a[href*='/Maastricht/']",
+        timeout=30000,
+    )
+    s = soup(html)
+    results = []
+    seen_hrefs = set()
+    for a in s.find_all("a", href=True):
+        href = a["href"]
+        if "Maastricht" not in href:
+            continue
+        if not any(x in href for x in ["/room/", "/apartment/", "/studio/"]):
+            continue
+        if href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+        if not href.startswith("http"):
+            href = "https://housinganywhere.com" + href
+        title = a.get_text(" ", strip=True)[:120]
+        price = extract_price(title)
+        if price and price > MAX_PRICE:
+            continue
+        uid = href.rstrip("/").split("/")[-1]
+        results.append({"id": f"ha-{uid}", "title": title, "price": str(price or "?"), "url": href})
     return results
 
 
@@ -268,147 +416,19 @@ def extract_price(text):
     return None
 
 
-def scrape_pararius():
-    r = SESSION.get(
-        "https://www.pararius.com/apartments/maastricht/0-750",
-        headers={
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
-            "Referer": "https://www.google.com/",
-        },
-        timeout=15,
-    )
-    r.raise_for_status()
-    s = soup(r.text)
-    results = []
-    for card in s.select(".listing-search-item"):
-        link = card.find("a", class_="listing-search-item__link--title", href=True)
-        if not link:
-            link = card.find("a", href=True)
-        if not link:
-            continue
-        href = link["href"]
-        if not href.startswith("http"):
-            href = "https://www.pararius.com" + href
-        title = card.get_text(" ", strip=True)[:120]
-        price = extract_price(title)
-        if price and price > MAX_PRICE:
-            continue
-        uid = href.rstrip("/").split("/")[-1]
-        results.append({"id": f"par-{uid}", "title": title, "price": str(price or "?"), "url": href})
-    return results
-
-
-def scrape_funda():
-    url = (
-        "https://www.funda.nl/zoeken/huur/"
-        "?selected_area=%5B%22maastricht%22%5D"
-        "&price=%22-750%22"
-        "&object_type=%5B%22apartment%22%2C%22house%22%5D"
-    )
-    html = get(url)
-    s = soup(html)
-    results = []
-    for card in s.select("[data-test-id='search-result-item'], .search-result, article"):
-        link = card.find("a", href=True)
-        if not link:
-            continue
-        href = link["href"]
-        if not href.startswith("http"):
-            href = "https://www.funda.nl" + href
-        if "/detail/" not in href and "/huur/" not in href:
-            continue
-        title = card.get_text(" ", strip=True)[:120]
-        price = extract_price(title)
-        if price and price > MAX_PRICE:
-            continue
-        uid = href.rstrip("/").split("/")[-1]
-        results.append({"id": f"funda-{uid}", "title": title, "price": str(price or "?"), "url": href})
-    return results
-
-
-def scrape_kamernet():
-    html = get("https://kamernet.nl/en/for-rent/rooms-maastricht")
-    s = soup(html)
-    results = []
-    for card in s.select(".tile, .listing-tile, [class*='tile'], [class*='listing']"):
-        link = card.find("a", href=True)
-        if not link:
-            continue
-        href = link["href"]
-        if not href.startswith("http"):
-            href = "https://kamernet.nl" + href
-        if "/for-rent/" not in href:
-            continue
-        title = card.get_text(" ", strip=True)[:120]
-        price = extract_price(title)
-        if price and price > MAX_PRICE:
-            continue
-        uid = href.rstrip("/").split("/")[-1]
-        results.append({"id": f"kn-{uid}", "title": title, "price": str(price or "?"), "url": href})
-    return results
-
-
-def scrape_huure():
-    html = get("https://huure.nl/rental-property/maastricht")
-    s = soup(html)
-    results = []
-    for card in s.select(".property-card, .listing-card, article, [class*='property'], [class*='listing']"):
-        link = card.find("a", href=True)
-        if not link:
-            continue
-        href = link["href"]
-        if not href.startswith("http"):
-            href = "https://huure.nl" + href
-        if "/huurwoningen/" not in href and "/rental-property/" not in href:
-            continue
-        title = card.get_text(" ", strip=True)[:120]
-        price = extract_price(title)
-        if price and price > MAX_PRICE:
-            continue
-        uid = href.rstrip("/").split("/")[-1]
-        results.append({"id": f"huure-{uid}", "title": title, "price": str(price or "?"), "url": href})
-    return results
-
-
-def scrape_housinganywhere():
-    html = get(
-        "https://housinganywhere.com/s/Maastricht--Netherlands/student-accommodation"
-        "?maxPrice=750"
-    )
-    s = soup(html)
-    results = []
-    for card in s.select("[class*='listing'], [class*='property'], article"):
-        link = card.find("a", href=True)
-        if not link:
-            continue
-        href = link["href"]
-        if not href.startswith("http"):
-            href = "https://housinganywhere.com" + href
-        if "/rooms/" not in href and "/apartments/" not in href and "/studios/" not in href:
-            continue
-        title = card.get_text(" ", strip=True)[:120]
-        price = extract_price(title)
-        if price and price > MAX_PRICE:
-            continue
-        uid = href.rstrip("/").split("/")[-1]
-        results.append({"id": f"ha-{uid}", "title": title, "price": str(price or "?"), "url": href})
-    return results
-
-
 SCRAPERS = {
     "pararius": scrape_pararius,
     "funda": scrape_funda,
     "kamernet": scrape_kamernet,
     "huure": scrape_huure,
     "housinganywhere": scrape_housinganywhere,
+    "kamermaastricht": scrape_kamermaastricht,
     "maasland": scrape_maasland,
     "vbt": scrape_vbt,
     "housing4you": scrape_housing4you,
     "househunting": scrape_househunting,
     "hypodomus": scrape_hypodomus,
     "huizenbeheer": scrape_huizenbeheer,
-    "kamermaastricht": scrape_kamermaastricht,
     "prohousing": scrape_prohousing,
     "roofz": scrape_roofz,
     "woonpleinlimburg": scrape_woonplein,
@@ -416,7 +436,7 @@ SCRAPERS = {
 
 
 # ---------------------------------------------------------------------------
-# Notification
+# Notifications
 # ---------------------------------------------------------------------------
 
 def _discord_post(content):
@@ -438,7 +458,6 @@ def send_discord(listings):
         return
     header = f"**Nauji Mastrichto nuomos skelbimai** ({len(listings)} vnt., ≤€{MAX_PRICE}/mėn.)\n"
     chunk = header
-    sent = 0
     for l in listings:
         line = f"• [{l['title'][:70]}]({l['url']}) — €{l['price']}/mėn.\n"
         if len(chunk) + len(line) > 1900:
@@ -482,25 +501,36 @@ def save_seen(seen):
 
 
 def main():
+    global _browser
     seen = load_seen()
     new_listings = []
-
     enabled = CONFIG.get("sites", list(SCRAPERS.keys()))
-    for name in enabled:
-        scraper = SCRAPERS.get(name)
-        if not scraper:
-            continue
-        try:
-            items = scraper()
-            new_count = 0
-            for item in items:
-                if item["id"] not in seen:
-                    new_listings.append(item)
-                    seen.add(item["id"])
-                    new_count += 1
-            print(f"{name}: {len(items)} skelbimai, {new_count} nauji")
-        except Exception as e:
-            print(f"{name}: klaida – {e}")
+
+    js_sites = {"pararius", "funda", "kamernet", "huure", "housinganywhere"}
+    needs_browser = any(s in js_sites for s in enabled)
+
+    with sync_playwright() as pw:
+        if needs_browser:
+            _browser = pw.chromium.launch(headless=True)
+
+        for name in enabled:
+            scraper = SCRAPERS.get(name)
+            if not scraper:
+                continue
+            try:
+                items = scraper()
+                new_count = 0
+                for item in items:
+                    if item["id"] not in seen:
+                        new_listings.append(item)
+                        seen.add(item["id"])
+                        new_count += 1
+                print(f"{name}: {len(items)} skelbimai, {new_count} nauji")
+            except Exception as e:
+                print(f"{name}: klaida – {e}")
+
+        if _browser:
+            _browser.close()
 
     save_seen(seen)
 
